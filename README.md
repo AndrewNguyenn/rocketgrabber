@@ -38,20 +38,45 @@ A real Chromium window opens at `app.rocketmoney.com`. Sign in normally — incl
 
 ## Grab transactions
 
+Rocket Money's CSV export is **email-mediated** — clicking the export button in their
+UI triggers a server-side job that emails you a download link. So this is two steps:
+
+### Step 1 — trigger the export
+
 ```bash
 python -m rocketgrabber.grab
 ```
 
-This:
+This drives Chromium with the saved session, clicks the CSV icon, then clicks
+"Export all transactions" in the popover, then waits for the "Export sent!" toast.
 
-1. Loads the saved browser session.
-2. Navigates to the transactions page.
-3. Finds and clicks the CSV-export button.
-4. Saves the download to:
-   - `data/transactions.csv` (overwritten each run — the canonical latest)
-   - `data/raw/transactions-<utc-timestamp>.csv` (per-run archive)
+If the auto-click fails (RM redesigns the page), use manual mode:
 
-Each invocation prints the columns and row count so you can sanity-check the export.
+```bash
+python -m rocketgrabber.grab --manual
+```
+
+### Step 2 — ingest the CSV
+
+A few minutes later, Rocket Money emails a download link. Click the link; the CSV
+lands in `~/Downloads/`. Then:
+
+```bash
+python -m rocketgrabber.fetch ~/Downloads/transactions.csv
+```
+
+This writes:
+- `data/transactions.csv` — canonical latest, overwritten each run
+- `data/raw/transactions-<utc-timestamp>.csv` — per-run archive
+
+It also prints the column header and row count so you can sanity-check.
+
+`fetch` also accepts an http(s) URL, in which case it uses Playwright with the saved
+session to download:
+
+```bash
+python -m rocketgrabber.fetch "https://app.rocketmoney.com/...export-link..."
+```
 
 ### Headed mode
 
@@ -69,15 +94,31 @@ You'll see a redirect back to the login page. Re-run `python -m rocketgrabber.lo
 
 ```
 rocketgrabber/
-├── scripts/setup.sh           # one-shot environment setup
+├── scripts/setup.sh                    # one-shot environment setup
 ├── src/rocketgrabber/
 │   ├── __init__.py
-│   ├── config.py              # paths, URLs
-│   ├── login.py               # interactive login → .auth/state.json
-│   └── grab.py                # navigate + click CSV → data/
-├── data/                      # CSV exports (gitignored)
-└── .auth/                     # Playwright storage state (gitignored)
+│   ├── config.py                       # paths, URLs
+│   ├── login.py                        # interactive login → .auth/state.json
+│   ├── grab.py                         # trigger RM's email-CSV export
+│   └── fetch.py                        # ingest a downloaded CSV → data/
+├── .claude/skills/rocketgrabber/       # Claude Code skill — see "Use as a skill" below
+├── data/                               # CSV exports (gitignored)
+└── .auth/                              # Playwright storage state (gitignored)
 ```
+
+## Use as a Claude Code skill
+
+A skill lives at `.claude/skills/rocketgrabber/SKILL.md` (project-local) and is mirrored
+to `~/.claude/skills/rocketgrabber/SKILL.md` (user-global). With it installed, you can
+just say things like:
+
+- "grab my rocket money transactions"
+- "pull the latest RM data"
+- "/rocketgrabber"
+
+…and Claude will: check the saved session, run `grab` to trigger the export, ask you
+to paste the email link or downloaded path once it arrives, run `fetch`, and report
+the row count.
 
 ## Troubleshooting
 

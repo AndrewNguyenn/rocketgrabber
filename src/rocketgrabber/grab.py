@@ -1,28 +1,26 @@
-"""Download Rocket Money's CSV export.
+"""Trigger Rocket Money's CSV export.
 
-The web app exposes a CSV-export button on the transactions page. We just
-click it and save the file — much simpler than scraping their GraphQL.
+Rocket Money's CSV export is email-mediated, not a direct download:
+the transactions page has a CSV icon that opens a popover; clicking
+"Export all transactions" sends an email with a download link a few
+minutes later. This script automates the trigger.
 
-Each run writes:
-    data/transactions.csv                 — the latest export (overwritten)
-    data/raw/transactions-<ts>.csv        — timestamped archive
+After running, check the email tied to your account and click the
+download link. Save the file as `data/transactions.csv`.
 
 Usage:
-    python -m rocketgrabber.grab           # headless
+    python -m rocketgrabber.grab           # headless, clicks through
     python -m rocketgrabber.grab --headed  # watch it work
+    python -m rocketgrabber.grab --manual  # click the buttons yourself
 """
 
 from __future__ import annotations
 
 import argparse
 import re
-import shutil
 import sys
-import time
-from datetime import datetime, timezone
 
 from playwright.sync_api import (
-    Download,
     Locator,
     TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
@@ -34,18 +32,15 @@ from . import config
 MANUAL_TIMEOUT_SECONDS = 300
 
 
-def _find_csv_button(page) -> Locator | None:
-    """Try a sequence of selectors for the CSV-export button. Returns the
-    first that exists and is visible, or None."""
+def _find_csv_icon_button(page) -> Locator | None:
+    """The CSV trigger is a small icon-only button next to the sort control.
+    No accessible label, so we approach by position + DOM structure."""
     candidates: list[Locator] = [
-        page.get_by_role("button", name=re.compile(r"\bcsv\b|export", re.I)),
         page.locator("button[aria-label*='CSV' i]"),
         page.locator("button[aria-label*='export' i]"),
         page.locator("button[title*='CSV' i]"),
-        page.locator("a[download][href$='.csv']"),
-        # The visible icon sits next to the sort control; this is a last-ditch
-        # heuristic against an icon-only button with no accessible name.
-        page.locator("button:has(svg):right-of(:text('Sort by'))").first,
+        # Icon-only button to the right of "Sort by date".
+        page.locator("button:has(svg):right-of(:text('Sort by'))"),
     ]
     for loc in candidates:
         try:
@@ -65,24 +60,10 @@ def run(headed: bool = False, manual: bool = False) -> int:
         )
         return 2
 
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    captured_download: list[Download] = []
-
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=not (headed or manual))
-        context = browser.new_context(
-            storage_state=str(config.STATE_FILE),
-            accept_downloads=True,
-        )
-
-        # Capture downloads from any page (including popups) opened in this context.
-        def attach_handlers(p) -> None:
-            p.on("download", lambda d: captured_download.append(d))
-
-        context.on("page", attach_handlers)
+        context = browser.new_context(storage_state=str(config.STATE_FILE))
         page = context.new_page()
-        attach_handlers(page)
 
         print(f">> opening {config.TRANSACTIONS_URL}")
         page.goto(config.TRANSACTIONS_URL, wait_until="domcontentloaded")
@@ -103,65 +84,70 @@ def run(headed: bool = False, manual: bool = False) -> int:
 
         if manual:
             print()
-            print("MANUAL MODE — click the CSV-export button yourself in the")
-            print("Chromium window. Complete any dialog Rocket Money shows.")
-            print(f"waiting up to {MANUAL_TIMEOUT_SECONDS}s for a download to start...")
+            print("MANUAL MODE — click the CSV icon, then 'Export all transactions'")
+            print("in the Chromium window. Wait for the 'Export sent!' confirmation.")
+            print(f"waiting up to {MANUAL_TIMEOUT_SECONDS}s...")
             print()
-            deadline = time.monotonic() + MANUAL_TIMEOUT_SECONDS
-            while not captured_download and time.monotonic() < deadline:
-                page.wait_for_timeout(500)
-            if not captured_download:
-                print("no download fired in the timeout window.", file=sys.stderr)
+            try:
+                page.get_by_text(re.compile(r"Export sent", re.I)).wait_for(
+                    timeout=MANUAL_TIMEOUT_SECONDS * 1000
+                )
+            except PlaywrightTimeoutError:
+                print("never saw 'Export sent!' confirmation.", file=sys.stderr)
                 context.close()
                 browser.close()
                 return 5
-            download = captured_download[0]
         else:
-            button = _find_csv_button(page)
-            if button is None:
+            icon = _find_csv_icon_button(page)
+            if icon is None:
                 print(
-                    "could not find the CSV export button on the page.\n"
-                    "re-run with --headed to inspect; if Rocket Money moved or "
-                    "renamed it, update _find_csv_button() in grab.py.\n"
-                    "or use --manual to click it yourself.",
+                    "could not find the CSV icon button.\n"
+                    "re-run with --manual to click it yourself.",
                     file=sys.stderr,
                 )
                 context.close()
                 browser.close()
                 return 4
 
-            print(">> clicking CSV export")
+            print(">> clicking CSV icon")
+            icon.click()
+
             try:
-                with page.expect_download(timeout=60_000) as dl_info:
-                    button.click()
-                download = dl_info.value
+                export_btn = page.get_by_role(
+                    "button", name=re.compile(r"export all transactions", re.I)
+                )
+                export_btn.first.wait_for(timeout=10_000)
+                print(">> clicking 'Export all transactions'")
+                export_btn.first.click()
             except PlaywrightTimeoutError:
                 print(
-                    "clicked the button but no download started within 60s.\n"
-                    "the click may have opened a confirm dialog — try --manual.",
+                    "popover with 'Export all transactions' didn't appear.\n"
+                    "Rocket Money may have changed the UI — try --manual.",
                     file=sys.stderr,
                 )
                 context.close()
                 browser.close()
                 return 5
 
-        latest = config.DATA_DIR / "transactions.csv"
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        archive = config.DATA_DIR / "raw" / f"transactions-{ts}.csv"
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        download.save_as(str(archive))
-        shutil.copy(archive, latest)
+            try:
+                page.get_by_text(re.compile(r"Export sent", re.I)).wait_for(timeout=20_000)
+            except PlaywrightTimeoutError:
+                print(
+                    "clicked through but never saw the 'Export sent!' confirmation.\n"
+                    "the export may still be queued; check your email.",
+                    file=sys.stderr,
+                )
+                # Don't fail hard — RM may have changed copy.
 
         context.close()
         browser.close()
 
-    with latest.open(encoding="utf-8") as fh:
-        header = fh.readline().rstrip("\r\n")
-        row_count = sum(1 for _ in fh)
-    print(f">> saved   {config.pretty_path(latest)}")
-    print(f">> archive {config.pretty_path(archive)}")
-    print(f">> columns {header}")
-    print(f">> rows    {row_count}")
+    print()
+    print(">> export triggered. Rocket Money will email a download link to the")
+    print("   address on your account in a few minutes. When it arrives:")
+    print()
+    print("   - click the link in the email; the CSV downloads to ~/Downloads/")
+    print("   - then run: python -m rocketgrabber.fetch ~/Downloads/<file>.csv")
     return 0
 
 
