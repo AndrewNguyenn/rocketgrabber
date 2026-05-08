@@ -15,7 +15,7 @@ reused for headless re-runs until it expires.
 ## Requirements
 
 - macOS (tested on Apple Silicon, Darwin 24)
-- Python 3.10+
+- Python 3.9+
 - A Rocket Money account
 
 ## Setup
