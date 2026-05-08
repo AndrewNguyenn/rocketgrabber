@@ -18,16 +18,16 @@ from typing import Any, Iterable, Iterator
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS transactions (
     id              TEXT PRIMARY KEY,
-    date            TEXT,
-    amount          REAL,
+    date            TEXT,                  -- ISO YYYY-MM-DD when extractable
+    amount          REAL,                  -- raw value as Rocket Money emits it; sign convention follows their API. Cents are scaled to dollars when the source key is *Cents.
     description     TEXT,
     merchant        TEXT,
     category        TEXT,
     account_id      TEXT,
     account_name    TEXT,
-    pending         INTEGER,
-    raw_json        TEXT NOT NULL,
-    first_seen_at   TEXT NOT NULL,
+    pending         INTEGER,               -- 0/1
+    raw_json        TEXT NOT NULL,         -- full original payload; source of truth if normalized columns drift
+    first_seen_at   TEXT NOT NULL,         -- ISO timestamp; preserved across re-grabs
     updated_at      TEXT NOT NULL
 );
 
@@ -87,8 +87,14 @@ def _normalize_pending(raw: Any) -> int | None:
 def _normalize_date(raw: Any) -> str | None:
     if raw is None:
         return None
+    if isinstance(raw, bool):
+        # bool is an int subclass — treat True/False as not a date.
+        return None
     if isinstance(raw, (int, float)):
-        # Heuristic: epoch seconds vs ms.
+        # Reject implausibly small numbers (day-of-month, counter values, etc.)
+        # that would otherwise resolve to 1970. 10**9 ~= Sep 2001 in seconds.
+        if abs(raw) < 10**9:
+            return None
         seconds = raw / 1000.0 if raw > 10**12 else float(raw)
         try:
             return datetime.fromtimestamp(seconds, tz=timezone.utc).date().isoformat()

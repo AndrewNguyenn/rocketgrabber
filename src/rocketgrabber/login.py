@@ -11,6 +11,8 @@ Run:
 
 from __future__ import annotations
 
+import os
+import stat
 import sys
 
 from playwright.sync_api import sync_playwright
@@ -46,6 +48,11 @@ def main() -> int:
             return 1
 
         context.storage_state(path=str(config.STATE_FILE))
+        # Live session cookies — restrict to owner-read/write.
+        try:
+            os.chmod(config.STATE_FILE, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
         print(f">> saved session to {config.pretty_path(config.STATE_FILE)}")
 
         context.close()
