@@ -85,7 +85,7 @@ def _scroll_and_load_more(page) -> None:
 def run(headed: bool = False, debug: bool = False) -> int:
     if not config.STATE_FILE.exists():
         print(
-            f"no saved session at {config.STATE_FILE.relative_to(config.REPO_ROOT)}.\n"
+            f"no saved session at {config.pretty_path(config.STATE_FILE)}.\n"
             f"run `python -m rocketgrabber.login` first.",
             file=sys.stderr,
         )
@@ -163,7 +163,7 @@ def run(headed: bool = False, debug: bool = False) -> int:
         inserted, updated = store.upsert(conn, captured)
         total = store.count(conn)
     print(f">> inserted={inserted} updated={updated} db_total={total}")
-    print(f">> db: {config.DB_FILE.relative_to(config.REPO_ROOT)}")
+    print(f">> db: {config.pretty_path(config.DB_FILE)}")
     return 0
 
 

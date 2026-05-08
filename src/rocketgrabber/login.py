@@ -46,7 +46,7 @@ def main() -> int:
             return 1
 
         context.storage_state(path=str(config.STATE_FILE))
-        print(f">> saved session to {config.STATE_FILE.relative_to(config.REPO_ROOT)}")
+        print(f">> saved session to {config.pretty_path(config.STATE_FILE)}")
 
         context.close()
         browser.close()

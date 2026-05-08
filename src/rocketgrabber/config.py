@@ -24,3 +24,11 @@ MAX_SCROLL_ROUNDS = 200
 
 # Playwright user-agent — leave None to use Chromium's default.
 USER_AGENT: str | None = None
+
+
+def pretty_path(p: Path) -> Path | str:
+    """Render a path relative to REPO_ROOT when possible, else absolute."""
+    try:
+        return p.relative_to(REPO_ROOT)
+    except ValueError:
+        return p
