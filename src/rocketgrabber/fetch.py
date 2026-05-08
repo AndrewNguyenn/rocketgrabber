@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import config
+from . import config, store
 
 
 def _is_url(s: str) -> bool:
@@ -90,7 +90,7 @@ def run(source: str) -> int:
     latest = config.DATA_DIR / "transactions.csv"
     shutil.copy(archive, latest)
 
-    with latest.open(encoding="utf-8") as fh:
+    with latest.open(encoding="utf-8-sig") as fh:
         header = fh.readline().rstrip("\r\n")
         row_count = sum(1 for _ in fh)
 
@@ -98,6 +98,12 @@ def run(source: str) -> int:
     print(f">> archive {config.pretty_path(archive)}")
     print(f">> columns {header}")
     print(f">> rows    {row_count}")
+
+    with store.connect(config.DB_FILE) as conn:
+        inserted, skipped = store.ingest(conn, latest)
+        total = store.count(conn)
+    print(f">> sqlite  inserted={inserted} skipped={skipped} db_total={total}")
+    print(f">> db      {config.pretty_path(config.DB_FILE)}")
     return 0
 
 

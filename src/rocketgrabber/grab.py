@@ -1,17 +1,20 @@
-"""Trigger Rocket Money's CSV export.
+"""Trigger Rocket Money's CSV export, and (optionally) fetch the result.
 
-Rocket Money's CSV export is email-mediated, not a direct download:
-the transactions page has a CSV icon that opens a popover; clicking
-"Export all transactions" sends an email with a download link a few
-minutes later. This script automates the trigger.
+Rocket Money's CSV export is email-mediated: the transactions page has
+a CSV icon that opens a popover; clicking "Export all transactions"
+sends an email with a download link a few minutes later.
 
-After running, check the email tied to your account and click the
-download link. Save the file as `data/transactions.csv`.
+This script:
+1. Drives Chromium with the saved session and clicks through the popover.
+2. If GMAIL_ADDRESS + GMAIL_APP_PASSWORD are present in .env, polls
+   Gmail for the resulting export email, downloads the linked CSV, and
+   ingests into SQLite. Otherwise, prints instructions for the user.
 
 Usage:
-    python -m rocketgrabber.grab           # headless, clicks through
-    python -m rocketgrabber.grab --headed  # watch it work
-    python -m rocketgrabber.grab --manual  # click the buttons yourself
+    python -m rocketgrabber.grab               # auto if .env is set, else manual fallback
+    python -m rocketgrabber.grab --no-auto     # only trigger; never poll Gmail
+    python -m rocketgrabber.grab --headed      # watch it work
+    python -m rocketgrabber.grab --manual      # click the buttons yourself
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from datetime import datetime, timedelta, timezone
 
 from playwright.sync_api import (
     Locator,
@@ -26,10 +30,12 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-from . import config
+from . import config, fetch, mail
 
 
 MANUAL_TIMEOUT_SECONDS = 300
+GMAIL_POLL_TIMEOUT_SECONDS = 600
+GMAIL_POLL_INTERVAL_SECONDS = 15
 
 
 def _find_csv_icon_button(page) -> Locator | None:
@@ -51,7 +57,7 @@ def _find_csv_icon_button(page) -> Locator | None:
     return None
 
 
-def run(headed: bool = False, manual: bool = False) -> int:
+def run(headed: bool = False, manual: bool = False, auto: bool = True) -> int:
     if not config.STATE_FILE.exists():
         print(
             f"no saved session at {config.pretty_path(config.STATE_FILE)}.\n"
@@ -59,6 +65,8 @@ def run(headed: bool = False, manual: bool = False) -> int:
             file=sys.stderr,
         )
         return 2
+
+    trigger_started_at = datetime.now(timezone.utc)
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=not (headed or manual))
@@ -143,11 +151,44 @@ def run(headed: bool = False, manual: bool = False) -> int:
         browser.close()
 
     print()
-    print(">> export triggered. Rocket Money will email a download link to the")
-    print("   address on your account in a few minutes. When it arrives:")
-    print()
-    print("   - click the link in the email; the CSV downloads to ~/Downloads/")
-    print("   - then run: python -m rocketgrabber.fetch ~/Downloads/<file>.csv")
+    print(">> export triggered.")
+
+    # Auto-fetch path: poll Gmail for the link, then hand to fetch.
+    addr, pwd = mail.credentials() if auto else (None, None)
+    if auto and addr and pwd:
+        # Anchor the search slightly before the trigger to handle clock skew.
+        since = trigger_started_at - timedelta(minutes=2)
+        print(
+            f">> polling {addr} for the export email "
+            f"(timeout={GMAIL_POLL_TIMEOUT_SECONDS}s, since={since.isoformat(timespec='seconds')})"
+        )
+        link = mail.find_export_link(
+            timeout_seconds=GMAIL_POLL_TIMEOUT_SECONDS,
+            poll_interval=GMAIL_POLL_INTERVAL_SECONDS,
+            since=since,
+        )
+        if not link:
+            print(
+                "no export email arrived within the timeout. "
+                "you can ingest manually once it shows up:\n"
+                "    python -m rocketgrabber.fetch <path-or-url>",
+                file=sys.stderr,
+            )
+            return 7
+        print(">> got export link; handing to fetch")
+        return fetch.run(link)
+
+    if not auto:
+        print(">> auto-fetch disabled (--no-auto)")
+    else:
+        print(
+            ">> Gmail credentials not configured; copy .env.example to .env and fill in "
+            "GMAIL_ADDRESS + GMAIL_APP_PASSWORD to enable end-to-end mode."
+        )
+    print(
+        ">> when the email arrives, click the link to download the CSV, then run:\n"
+        "       python -m rocketgrabber.fetch ~/Downloads/<file>.csv"
+    )
     return 0
 
 
@@ -159,8 +200,13 @@ def main() -> int:
         action="store_true",
         help="open headed and wait for you to click the CSV button yourself",
     )
+    parser.add_argument(
+        "--no-auto",
+        action="store_true",
+        help="don't poll Gmail after triggering, even if credentials are present",
+    )
     args = parser.parse_args()
-    return run(headed=args.headed, manual=args.manual)
+    return run(headed=args.headed, manual=args.manual, auto=not args.no_auto)
 
 
 if __name__ == "__main__":
