@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rocketgrabber"
+version = "0.1.0"
+description = "Pull your Rocket Money transaction history to local SQLite + CSV via Playwright."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "playwright==1.49.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

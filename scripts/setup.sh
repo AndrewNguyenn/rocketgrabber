@@ -14,8 +14,8 @@ source .venv/bin/activate
 echo ">> upgrading pip"
 python -m pip install --upgrade pip >/dev/null
 
-echo ">> installing requirements"
-pip install -r requirements.txt
+echo ">> installing rocketgrabber + dependencies (editable)"
+pip install -e .
 
 echo ">> installing chromium for playwright"
 python -m playwright install chromium
