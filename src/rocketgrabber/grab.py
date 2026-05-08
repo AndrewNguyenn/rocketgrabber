@@ -139,13 +139,26 @@ def run(headed: bool = False, manual: bool = False, auto: bool = True) -> int:
 
             try:
                 page.get_by_text(re.compile(r"Export sent", re.I)).wait_for(timeout=20_000)
+                export_confirmed = True
             except PlaywrightTimeoutError:
+                export_confirmed = False
                 print(
-                    "clicked through but never saw the 'Export sent!' confirmation.\n"
-                    "the export may still be queued; check your email.",
+                    "clicked through but never saw the 'Export sent!' confirmation.",
                     file=sys.stderr,
                 )
-                # Don't fail hard — RM may have changed copy.
+
+            if not export_confirmed and auto:
+                print(
+                    "in auto mode this is treated as a hard failure — the email "
+                    "isn't going to arrive. retry with --manual to see what's "
+                    "happening, or with --no-auto to fall back to manual fetch.",
+                    file=sys.stderr,
+                )
+                context.close()
+                browser.close()
+                return 5
+            # Without --auto we accept the soft path: maybe RM changed copy
+            # and the export still went; user can fetch manually.
 
         context.close()
         browser.close()

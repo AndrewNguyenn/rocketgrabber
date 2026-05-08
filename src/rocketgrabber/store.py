@@ -67,6 +67,9 @@ def _normalize_amount(s: str | None) -> float | None:
 
 
 def _normalize_date(s: str | None) -> str | None:
+    """Return ISO YYYY-MM-DD on success, None on parse failure. The original
+    string is preserved in the row's `raw_json`, so dropping non-conforming
+    values here keeps the `date` column strictly sortable + indexable."""
     if not s:
         return None
     raw = s.strip()
@@ -83,22 +86,28 @@ def _normalize_date(s: str | None) -> str | None:
             return datetime.strptime(raw, fmt).date().isoformat()
         except ValueError:
             continue
-    return raw  # Surface the original string for forensics rather than dropping.
+    return None
 
 
 def _row_hash(date: str | None, amount: float | None, description: str | None,
-              category: str | None, account: str | None) -> str:
-    """Stable hash over canonical fields only — ignores presentational columns
-    (notes, labels, raw description casing) so re-ingests don't create dupes
-    when RM tweaks their CSV. Two genuinely-identical transactions (same
-    date/amount/description/category/account) will collapse; if that
-    matters, we'll need RM to expose a stable transaction id."""
+              category: str | None, account: str | None, occurrence: int) -> str:
+    """Stable hash over canonical fields plus a within-day occurrence index
+    so two genuinely-identical transactions on the same day (e.g. two $4.50
+    coffees at the same shop) get distinct rows.
+
+    Stable across re-ingests of the same export: as long as RM emits rows
+    in the same order, the Nth duplicate gets the same hash both times.
+    Overlapping-but-different exports (June 1-30 vs June 15-July 15) may
+    still double-insert same-day-same-everything transactions if their
+    relative order differs — without an RM-supplied id, that's the best
+    we can do without dropping real data."""
     canonical = "|".join([
         date or "",
         f"{amount:.4f}" if amount is not None else "",
         (description or "").strip().lower(),
         (category or "").strip().lower(),
         (account or "").strip().lower(),
+        str(occurrence),
     ])
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
 
@@ -123,6 +132,9 @@ def ingest(conn: sqlite3.Connection, csv_path: Path) -> tuple[int, int]:
     inserted = 0
     skipped = 0
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Per-CSV occurrence counter: the Nth row matching the same canonical
+    # fingerprint within this file gets occurrence=N. See _row_hash.
+    occurrence_counter: dict[tuple[str, str, str, str, str], int] = {}
     with csv_path.open(encoding="utf-8-sig", newline="") as fh:
         reader = csv.DictReader(fh)
         for row in reader:
@@ -131,7 +143,16 @@ def ingest(conn: sqlite3.Connection, csv_path: Path) -> tuple[int, int]:
             description = _pick(row, DESC_COLS)
             category = _pick(row, CATEGORY_COLS)
             account = _pick(row, ACCOUNT_COLS)
-            row_hash = _row_hash(date, amount, description, category, account)
+            key = (
+                date or "",
+                f"{amount:.4f}" if amount is not None else "",
+                (description or "").strip().lower(),
+                (category or "").strip().lower(),
+                (account or "").strip().lower(),
+            )
+            occurrence = occurrence_counter.get(key, 0)
+            occurrence_counter[key] = occurrence + 1
+            row_hash = _row_hash(date, amount, description, category, account, occurrence)
             raw_json = json.dumps(row, default=str)
             cur = conn.execute(
                 """

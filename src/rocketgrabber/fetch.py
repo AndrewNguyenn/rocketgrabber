@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import config, store
+from . import config, mail, store
 
 
 def _is_url(s: str) -> bool:
@@ -37,6 +37,16 @@ def _is_url(s: str) -> bool:
 
 def _download_with_session(url: str, target: Path) -> int:
     from playwright.sync_api import sync_playwright
+
+    if not mail.is_rm_host(url):
+        print(
+            f"refusing to fetch non-RM host: {url!r}\n"
+            "the URL must be on rocketmoney.com (or a subdomain). "
+            "this is a defense against handing tracker/redirect URLs to a "
+            "browser context that holds your live RM session.",
+            file=sys.stderr,
+        )
+        return 8
 
     if not config.STATE_FILE.exists():
         print(
@@ -68,12 +78,30 @@ def _download_with_session(url: str, target: Path) -> int:
     return 0
 
 
+def _looks_like_csv(path: Path) -> bool:
+    """Sanity-check that we got a CSV and not an HTML error page or empty file."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    with path.open("rb") as fh:
+        head = fh.read(512)
+    sample = head.lstrip().lower()
+    if sample.startswith(b"<!doctype") or sample.startswith(b"<html"):
+        return False
+    if b"\x00" in head:  # binary
+        return False
+    # Heuristic: must contain at least one comma in the first line.
+    first_line = head.split(b"\n", 1)[0]
+    return b"," in first_line
+
+
 def run(source: str) -> int:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     archive_dir = config.DATA_DIR / "raw"
     archive_dir.mkdir(parents=True, exist_ok=True)
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Microsecond resolution so two runs in the same second can't clobber
+    # each other's archives.
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     archive = archive_dir / f"transactions-{ts}.csv"
 
     if _is_url(source):
@@ -86,6 +114,15 @@ def run(source: str) -> int:
             print(f"no such file: {src}", file=sys.stderr)
             return 1
         shutil.copy(src, archive)
+
+    if not _looks_like_csv(archive):
+        size = archive.stat().st_size if archive.exists() else 0
+        print(
+            f"the saved file ({size} bytes) doesn't look like a CSV — refusing "
+            f"to overwrite data/transactions.csv or ingest. inspect: {archive}",
+            file=sys.stderr,
+        )
+        return 9
 
     latest = config.DATA_DIR / "transactions.csv"
     shutil.copy(archive, latest)

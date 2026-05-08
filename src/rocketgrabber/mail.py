@@ -28,6 +28,8 @@ from datetime import datetime, timedelta, timezone
 from email.message import Message
 from email.utils import parsedate_to_datetime
 
+from urllib.parse import urlparse
+
 from . import config
 
 
@@ -39,28 +41,67 @@ DEFAULT_SUBJECT_KEYWORDS = ("export", "csv", "transactions")
 
 URL_PATTERN = re.compile(r'https?://[^\s"\'<>)\]]+')
 
+# Only URLs on these hosts (or true subdomains) are eligible to be picked
+# from the email body. Without this, a click-tracker or unsubscribe link
+# would happily be handed to a Playwright session carrying the user's
+# live Rocket Money cookies — a real CSRF surface.
+RM_HOST_ALLOWLIST: tuple[str, ...] = ("rocketmoney.com",)
+
+
+def is_rm_host(url: str) -> bool:
+    try:
+        host = urlparse(url).netloc.lower()
+    except Exception:
+        return False
+    if not host:
+        return False
+    # Strip user-info / port if present.
+    host = host.rsplit("@", 1)[-1].split(":", 1)[0]
+    return any(host == h or host.endswith("." + h) for h in RM_HOST_ALLOWLIST)
+
 
 def load_env() -> None:
     """Best-effort load of KEY=VALUE pairs from .env into os.environ.
-    Existing env vars take precedence (we don't override)."""
+    Existing env vars take precedence (we don't override).
+
+    Supports `export KEY=VALUE`, single/double-quoted values (whose contents
+    are taken literally and the rest of the line ignored), and inline
+    `# comment` after an unquoted value."""
     if not config.ENV_FILE.exists():
         return
     for raw in config.ENV_FILE.read_text().splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip()
-        # Strip wrapping single or double quotes if symmetric.
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+        if value.startswith(('"', "'")):
+            quote = value[0]
+            close = value.find(quote, 1)
+            value = value[1:close] if close > 0 else value[1:]
+        else:
+            # Unquoted: strip an inline `# comment` if present, then whitespace.
+            hash_idx = value.find("#")
+            if hash_idx >= 0:
+                value = value[:hash_idx]
+            value = value.rstrip()
         os.environ.setdefault(key, value)
 
 
 def credentials() -> tuple[str | None, str | None]:
     load_env()
-    return os.environ.get("GMAIL_ADDRESS"), os.environ.get("GMAIL_APP_PASSWORD")
+    addr = os.environ.get("GMAIL_ADDRESS")
+    pwd = os.environ.get("GMAIL_APP_PASSWORD")
+    # Google app passwords display with spaces ("abcd efgh ..."); strip
+    # all whitespace so a paste-with-spaces still authenticates.
+    if addr is not None:
+        addr = addr.strip()
+    if pwd is not None:
+        pwd = "".join(pwd.split())
+    return addr or None, pwd or None
 
 
 def _connect() -> imaplib.IMAP4_SSL | None:
@@ -104,15 +145,18 @@ def _extract_export_link(msg: Message) -> str | None:
         text_parts.append(_decode_part(msg))
     body = "\n".join(text_parts)
 
-    candidates = URL_PATTERN.findall(body)
+    # Hard host filter: only consider URLs on rocketmoney.com (or true
+    # subdomains). Click-trackers and unsubscribe links are filtered out.
+    candidates = [u for u in URL_PATTERN.findall(body) if is_rm_host(u)]
     if not candidates:
         return None
 
     def score(url: str) -> tuple[int, int]:
-        # Lower-is-better. First key prefers RM-or-export-flavored URLs.
+        # Lower-is-better. Prefer URLs that look export-flavored, then
+        # shorter ones. Both signals are now within the RM host space.
         u = url.lower()
-        rm_flavored = any(k in u for k in ("rocketmoney", "export", "download", ".csv"))
-        return (0 if rm_flavored else 1, len(url))
+        export_flavored = any(k in u for k in ("export", "download", ".csv"))
+        return (0 if export_flavored else 1, len(url))
 
     return min(candidates, key=score)
 
@@ -146,8 +190,10 @@ def find_export_link(
 
     seen_uids: set[bytes] = set()
     try:
+        # Read-only so polling never marks messages as Seen — the user's
+        # inbox shouldn't change behavior because a script glanced at it.
+        conn.select("INBOX", readonly=True)
         while True:
-            conn.select("INBOX")
             date_str = since_dt.strftime("%d-%b-%Y")
             typ, data = conn.search(None, f'(SINCE "{date_str}" FROM "{DEFAULT_FROM_PATTERN}")')
             if typ != "OK":
@@ -163,7 +209,9 @@ def find_export_link(
             # Newest first: IMAP returns oldest→newest, so reverse.
             for uid in reversed(new_uids):
                 seen_uids.add(uid)
-                typ, fdata = conn.fetch(uid, "(RFC822)")
+                # BODY.PEEK[] keeps the \Seen flag untouched even on
+                # connections that aren't read-only.
+                typ, fdata = conn.fetch(uid, "(BODY.PEEK[])")
                 if typ != "OK" or not fdata or not fdata[0]:
                     continue
                 raw = fdata[0][1] if isinstance(fdata[0], tuple) else b""
@@ -174,7 +222,9 @@ def find_export_link(
                 subject = (msg.get("Subject") or "").lower()
                 if not any(k in subject for k in DEFAULT_SUBJECT_KEYWORDS):
                     if debug:
-                        print(f"  skip uid={uid.decode()} subject={subject!r}")
+                        # Truncate so debug output the user might paste in
+                        # a bug report doesn't leak inbox subject lines.
+                        print(f"  skip uid={uid.decode()} subject={subject[:40]!r}")
                     continue
 
                 msg_dt = _parse_msg_date(msg)
@@ -186,7 +236,7 @@ def find_export_link(
                 link = _extract_export_link(msg)
                 if link:
                     if debug:
-                        print(f"  match uid={uid.decode()} subject={subject!r}")
+                        print(f"  match uid={uid.decode()} subject={subject[:40]!r}")
                     return link
 
             if time.monotonic() >= deadline:
