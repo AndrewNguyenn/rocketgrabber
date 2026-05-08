@@ -1,0 +1,30 @@
+# Persistent browser auth state — contains session cookies, MUST NOT be committed
+.auth/
+
+# Local data (transactions, DB) — personal financial data
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
