@@ -12,6 +12,7 @@ STATE_FILE = AUTH_DIR / "state.json"
 DATA_DIR = REPO_ROOT / "data"
 DB_FILE = DATA_DIR / "rocketgrabber.db"
 CSV_FILE = DATA_DIR / "transactions.csv"
+ENV_FILE = REPO_ROOT / ".env"
 
 LOGIN_URL = "https://app.rocketmoney.com/login"
 TRANSACTIONS_URL = "https://app.rocketmoney.com/transactions"
