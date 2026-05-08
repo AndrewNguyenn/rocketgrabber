@@ -28,3 +28,7 @@ __pycache__/
 .idea/
 .vscode/
 *.swp
+
+# Claude Code runtime artifacts
+.claude/scheduled_tasks.lock
+.claude/tasks/
