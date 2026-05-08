@@ -78,7 +78,7 @@ def _scroll_and_load_more(page) -> None:
             button = page.get_by_role("button", name=label, exact=False)
             if button.count() > 0 and button.first.is_visible():
                 button.first.click(timeout=1000)
-        except (PlaywrightTimeoutError, Exception):
+        except Exception:
             pass
 
 
@@ -101,14 +101,17 @@ def run(headed: bool = False, debug: bool = False) -> int:
             ctype = response.headers.get("content-type", "")
             if "json" not in ctype:
                 return
-            if "rocketmoney.com" not in response.url and "rocketmoney" not in response.url:
+            if "rocketmoney" not in response.url:
                 return
             body = response.json()
         except Exception:
             return
         new_for_this_response = 0
         for tx in find_transactions(body):
-            tx_id = next((str(tx[k]) for k in ("id", "transactionId", "uuid", "_id") if k in tx), None)
+            tx_id = next(
+                (str(tx[k]) for k in ("id", "transactionId", "uuid", "_id") if tx.get(k)),
+                None,
+            )
             if not tx_id or tx_id in seen_ids:
                 continue
             seen_ids.add(tx_id)
