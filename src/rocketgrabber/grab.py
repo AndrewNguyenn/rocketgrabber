@@ -36,6 +36,29 @@ _DATE_KEYS = {"date", "transactionDate", "postedDate", "authorizedDate"}
 # institution, or other non-transaction record — reject even if it has id+date.
 _NON_TRANSACTION_KEYS = {"balance", "currentBalance", "availableBalance", "mask", "routingNumber"}
 
+# Known GraphQL __typename values that have id+amount/date but are NOT
+# the per-transaction records we want. Substring matching here is unsafe
+# (TransactionCategory etc. would slip through), so we use an explicit
+# deny-list and let unknown typenames fall through to the id+amount/date
+# check. Add to this list as new types are observed via --debug.
+_NON_TRANSACTION_TYPENAMES = {
+    "Account",
+    "Institution",
+    "Budget",
+    "Category",
+    "Goal",
+    "Subscription",
+    "Rule",
+    "TransactionRule",
+    "TransactionCategory",
+    "TransactionFilter",
+    "RecurringTransaction",
+    "PendingTransactionUpdate",
+    "PageInfo",
+    "User",
+    "Profile",
+}
+
 
 def looks_like_transaction(obj: Any) -> bool:
     if not isinstance(obj, dict):
@@ -46,9 +69,7 @@ def looks_like_transaction(obj: Any) -> bool:
     if _NON_TRANSACTION_KEYS & keys:
         return False
     typename = obj.get("__typename")
-    if isinstance(typename, str) and "transaction" not in typename.lower() \
-            and typename.lower() not in {"node"}:
-        # GraphQL types like "Account", "Budget", "Category" — not transactions.
+    if isinstance(typename, str) and typename in _NON_TRANSACTION_TYPENAMES:
         return False
     return bool((_AMOUNT_KEYS & keys) or (_DATE_KEYS & keys))
 
@@ -125,7 +146,9 @@ def run(headed: bool = False, debug: bool = False) -> int:
             host = urlparse(response.url).netloc.lower()
         except Exception:
             return
-        if not host.endswith("app.rocketmoney.com"):
+        # Anchor on the exact host (or a true subdomain of it) so a host
+        # like `evilapp.rocketmoney.com` can't slip through with `endswith`.
+        if host != "app.rocketmoney.com" and not host.endswith(".app.rocketmoney.com"):
             return
         ctype = response.headers.get("content-type", "")
         if "json" not in ctype:
