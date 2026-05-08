@@ -18,15 +18,20 @@ import argparse
 import re
 import shutil
 import sys
+import time
 from datetime import datetime, timezone
 
 from playwright.sync_api import (
+    Download,
     Locator,
     TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
 
 from . import config
+
+
+MANUAL_TIMEOUT_SECONDS = 300
 
 
 def _find_csv_button(page) -> Locator | None:
@@ -51,7 +56,7 @@ def _find_csv_button(page) -> Locator | None:
     return None
 
 
-def run(headed: bool = False) -> int:
+def run(headed: bool = False, manual: bool = False) -> int:
     if not config.STATE_FILE.exists():
         print(
             f"no saved session at {config.pretty_path(config.STATE_FILE)}.\n"
@@ -62,13 +67,22 @@ def run(headed: bool = False) -> int:
 
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    captured_download: list[Download] = []
+
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=not headed)
+        browser = pw.chromium.launch(headless=not (headed or manual))
         context = browser.new_context(
             storage_state=str(config.STATE_FILE),
             accept_downloads=True,
         )
+
+        # Capture downloads from any page (including popups) opened in this context.
+        def attach_handlers(p) -> None:
+            p.on("download", lambda d: captured_download.append(d))
+
+        context.on("page", attach_handlers)
         page = context.new_page()
+        attach_handlers(page)
 
         print(f">> opening {config.TRANSACTIONS_URL}")
         page.goto(config.TRANSACTIONS_URL, wait_until="domcontentloaded")
@@ -87,32 +101,49 @@ def run(headed: bool = False) -> int:
         except PlaywrightTimeoutError:
             pass
 
-        button = _find_csv_button(page)
-        if button is None:
-            print(
-                "could not find the CSV export button on the page.\n"
-                "re-run with --headed to inspect; if Rocket Money moved or "
-                "renamed it, update _find_csv_button() in grab.py.",
-                file=sys.stderr,
-            )
-            context.close()
-            browser.close()
-            return 4
+        if manual:
+            print()
+            print("MANUAL MODE — click the CSV-export button yourself in the")
+            print("Chromium window. Complete any dialog Rocket Money shows.")
+            print(f"waiting up to {MANUAL_TIMEOUT_SECONDS}s for a download to start...")
+            print()
+            deadline = time.monotonic() + MANUAL_TIMEOUT_SECONDS
+            while not captured_download and time.monotonic() < deadline:
+                page.wait_for_timeout(500)
+            if not captured_download:
+                print("no download fired in the timeout window.", file=sys.stderr)
+                context.close()
+                browser.close()
+                return 5
+            download = captured_download[0]
+        else:
+            button = _find_csv_button(page)
+            if button is None:
+                print(
+                    "could not find the CSV export button on the page.\n"
+                    "re-run with --headed to inspect; if Rocket Money moved or "
+                    "renamed it, update _find_csv_button() in grab.py.\n"
+                    "or use --manual to click it yourself.",
+                    file=sys.stderr,
+                )
+                context.close()
+                browser.close()
+                return 4
 
-        print(">> clicking CSV export")
-        try:
-            with page.expect_download(timeout=60_000) as dl_info:
-                button.click()
-            download = dl_info.value
-        except PlaywrightTimeoutError:
-            print(
-                "clicked the button but no download started within 60s.\n"
-                "the button may open a confirm dialog — try --headed.",
-                file=sys.stderr,
-            )
-            context.close()
-            browser.close()
-            return 5
+            print(">> clicking CSV export")
+            try:
+                with page.expect_download(timeout=60_000) as dl_info:
+                    button.click()
+                download = dl_info.value
+            except PlaywrightTimeoutError:
+                print(
+                    "clicked the button but no download started within 60s.\n"
+                    "the click may have opened a confirm dialog — try --manual.",
+                    file=sys.stderr,
+                )
+                context.close()
+                browser.close()
+                return 5
 
         latest = config.DATA_DIR / "transactions.csv"
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -137,8 +168,13 @@ def run(headed: bool = False) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Download Rocket Money's transactions CSV.")
     parser.add_argument("--headed", action="store_true", help="show the browser")
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="open headed and wait for you to click the CSV button yourself",
+    )
     args = parser.parse_args()
-    return run(headed=args.headed)
+    return run(headed=args.headed, manual=args.manual)
 
 
 if __name__ == "__main__":
