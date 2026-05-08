@@ -39,43 +39,63 @@ A real Chromium window opens at `app.rocketmoney.com`. Sign in normally — incl
 ## Grab transactions
 
 Rocket Money's CSV export is **email-mediated** — clicking the export button in their
-UI triggers a server-side job that emails you a download link. So this is two steps:
+UI triggers a server-side job that emails you a download link. There are two ways to
+run the pipeline.
 
-### Step 1 — trigger the export
+### Option A: full auto (recommended)
+
+Set up Gmail credentials once:
+
+1. Generate an app password at https://myaccount.google.com/apppasswords (requires 2FA
+   on your Google account).
+2. `cp .env.example .env`, fill in `GMAIL_ADDRESS` + `GMAIL_APP_PASSWORD`, then
+   `chmod 600 .env`.
+
+Then a single command does the whole pipeline:
 
 ```bash
 python -m rocketgrabber.grab
 ```
 
-This drives Chromium with the saved session, clicks the CSV icon, then clicks
-"Export all transactions" in the popover, then waits for the "Export sent!" toast.
+Steps it runs:
 
-If the auto-click fails (RM redesigns the page), use manual mode:
+1. Drives Chromium → clicks the CSV icon → "Export all transactions" → waits for
+   "Export sent!".
+2. Polls Gmail (IMAP, TLS) for the export email — by default up to 10 minutes,
+   checking every 15s.
+3. Pulls the download link out of the email body.
+4. Downloads the CSV via Playwright with the saved RM session.
+5. Saves to `data/transactions.csv` (canonical latest) and
+   `data/raw/transactions-<utc-ts>.csv` (per-run archive).
+6. Ingests into `data/rocketgrabber.db` (SQLite) with idempotent dedup.
+
+If something goes wrong mid-flow (e.g. Gmail polling times out), you can still finish
+manually with `fetch` — see Option B.
+
+### Option B: manual ingest
+
+Without `.env`, the trigger half still runs:
 
 ```bash
-python -m rocketgrabber.grab --manual
+python -m rocketgrabber.grab --no-auto    # or with no .env at all
 ```
 
-### Step 2 — ingest the CSV
-
-A few minutes later, Rocket Money emails a download link. Click the link; the CSV
-lands in `~/Downloads/`. Then:
+Open the email, click the link, the CSV lands in `~/Downloads/`. Then:
 
 ```bash
 python -m rocketgrabber.fetch ~/Downloads/transactions.csv
+# or pass a URL:
+python -m rocketgrabber.fetch "https://app.rocketmoney.com/...export-link..."
 ```
 
-This writes:
-- `data/transactions.csv` — canonical latest, overwritten each run
-- `data/raw/transactions-<utc-timestamp>.csv` — per-run archive
+`fetch` does the same archive + canonical-CSV write + SQLite ingest as the auto flow.
 
-It also prints the column header and row count so you can sanity-check.
-
-`fetch` also accepts an http(s) URL, in which case it uses Playwright with the saved
-session to download:
+### Other modes
 
 ```bash
-python -m rocketgrabber.fetch "https://app.rocketmoney.com/...export-link..."
+python -m rocketgrabber.grab --headed     # watch Chromium drive the page
+python -m rocketgrabber.grab --manual     # click the buttons yourself
+python -m rocketgrabber.mail               # standalone Gmail poll, prints URL
 ```
 
 ### Headed mode
@@ -95,14 +115,18 @@ You'll see a redirect back to the login page. Re-run `python -m rocketgrabber.lo
 ```
 rocketgrabber/
 ├── scripts/setup.sh                    # one-shot environment setup
+├── pyproject.toml                      # editable install
+├── .env.example                        # template for GMAIL_* secrets (.env is gitignored)
 ├── src/rocketgrabber/
 │   ├── __init__.py
 │   ├── config.py                       # paths, URLs
 │   ├── login.py                        # interactive login → .auth/state.json
-│   ├── grab.py                         # trigger RM's email-CSV export
-│   └── fetch.py                        # ingest a downloaded CSV → data/
+│   ├── grab.py                         # trigger RM's email-CSV export, optionally auto-fetch
+│   ├── mail.py                         # Gmail IMAP poll → export link
+│   ├── fetch.py                        # path-or-URL → data/transactions.csv + SQLite
+│   └── store.py                        # CSV → SQLite ingest with dedup
 ├── .claude/skills/rocketgrabber/       # Claude Code skill — see "Use as a skill" below
-├── data/                               # CSV exports (gitignored)
+├── data/                               # CSV exports + SQLite DB (gitignored)
 └── .auth/                              # Playwright storage state (gitignored)
 ```
 

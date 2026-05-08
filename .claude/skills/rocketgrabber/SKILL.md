@@ -1,19 +1,18 @@
 ---
 name: rocketgrabber
-description: Pull the user's Rocket Money transaction history. Triggers Rocket Money's CSV export (email-mediated), waits for the user to receive the email, then ingests the CSV into the local data/ directory of /Users/andrewnguyen/workspace/rocketgrabber. Use when the user says things like "grab my rocket money transactions", "pull my rocket money data", "fetch latest RM export", "/rocketgrabber", or otherwise wants a fresh CSV of their Rocket Money transactions on disk.
+description: Pull the user's Rocket Money transaction history end-to-end. Triggers Rocket Money's CSV export (email-mediated), polls Gmail for the export link if credentials are configured, downloads and ingests into local SQLite + CSV under /Users/andrewnguyen/workspace/rocketgrabber/data/. Use when the user says things like "grab my rocket money transactions", "pull my rocket money data", "fetch latest RM export", "/rocketgrabber".
 ---
 
 # rocketgrabber
 
 End-to-end workflow to pull the user's Rocket Money transactions to disk.
 
-Repo lives at `/Users/andrewnguyen/workspace/rocketgrabber`. It has an editable
-Python install with two relevant entrypoints:
+Repo lives at `/Users/andrewnguyen/workspace/rocketgrabber`. Editable Python install with these entrypoints:
 
-- `python -m rocketgrabber.grab` — drives Chromium with the saved Rocket Money session, clicks the CSV-export icon and the "Export all transactions" button. Rocket Money emails a download link; the script does NOT receive the file directly.
-- `python -m rocketgrabber.fetch <path-or-url>` — saves a CSV to `data/transactions.csv` plus a timestamped archive under `data/raw/`. Accepts either a local file path (e.g. one in `~/Downloads/` after the user clicks the email link) or an http(s) URL (downloaded via Playwright using the saved session).
-
-There is also `python -m rocketgrabber.login` for re-authenticating when the saved session at `.auth/state.json` expires. The user does this themselves because it's interactive (2FA).
+- `python -m rocketgrabber.login` — interactive (headed Chromium + 2FA). User must run this themselves.
+- `python -m rocketgrabber.grab` — drives Chromium to trigger RM's CSV-export email. If `GMAIL_ADDRESS` + `GMAIL_APP_PASSWORD` are present in `.env`, also polls Gmail for the resulting email link, downloads the CSV, and ingests into SQLite. End-to-end in one command.
+- `python -m rocketgrabber.fetch <path-or-url>` — manual ingest path. Accepts a local CSV file or an http(s) URL. Copies to `data/transactions.csv` + a timestamped archive, then ingests into `data/rocketgrabber.db`.
+- `python -m rocketgrabber.mail` — standalone Gmail poll; prints the latest export link to stdout. Useful for debugging.
 
 ## How to run the workflow
 
@@ -21,62 +20,69 @@ Always work from `/Users/andrewnguyen/workspace/rocketgrabber`. Use `.venv/bin/p
 
 ### Step 1 — preflight
 
-Check that the saved session exists. If it doesn't, the user must log in interactively first.
-
 ```
-test -f /Users/andrewnguyen/workspace/rocketgrabber/.auth/state.json
+test -f /Users/andrewnguyen/workspace/rocketgrabber/.auth/state.json && echo "session ok" || echo "no session"
 ```
 
-If missing, tell the user to run `python -m rocketgrabber.login` themselves in their terminal (you cannot, because it requires them to type their password and 2FA in a real Chromium window). Wait for them to confirm before continuing.
+If "no session": tell the user to run `python -m rocketgrabber.login` themselves in their terminal (you cannot — it requires interactive credentials + 2FA in a real Chromium window). Wait for them to confirm before continuing.
 
-### Step 2 — trigger the export
+### Step 2 — try the auto flow first
 
 ```
 cd /Users/andrewnguyen/workspace/rocketgrabber && .venv/bin/python -m rocketgrabber.grab
 ```
 
-Expected outcome: the script reports "Export sent!" was confirmed on the page. If it fails (selector drift, RM redesign), retry with `--manual` and have the user click through themselves:
+There are three outcomes:
 
-```
-cd /Users/andrewnguyen/workspace/rocketgrabber && .venv/bin/python -m rocketgrabber.grab --manual
-```
+1. **Full auto succeeds.** You'll see `>> sqlite inserted=N skipped=M db_total=K`. Done — relay the numbers to the user.
 
-If the run says "redirected to login", the session expired — go back to step 1.
+2. **Trigger succeeds but Gmail isn't configured** (`>> Gmail credentials not configured`). The script printed instructions to fall back to manual fetch. Go to step 3.
 
-### Step 3 — wait for, and ingest, the email
+3. **Trigger succeeds but Gmail polling times out** (`no export email arrived within the timeout`). The export email may still arrive late, or the Gmail filter is too narrow. Go to step 3 or step 4.
 
-The export email lands at the user's Rocket Money account email (Gmail, in this user's case) within ~5 minutes. **Do not poll Gmail yourself** — there's no programmatic Gmail integration in this repo. Instead:
+### Step 3 — manual fetch (Gmail not set up, or auto timed out)
 
-1. Tell the user: "Rocket Money will email you a download link in a few minutes. When it arrives, click the link in the email — the CSV will land in `~/Downloads/`. Then tell me when it's done."
-2. When the user confirms, find the most recent `*.csv` in `~/Downloads/` (Rocket Money's exports usually start with `transactions` or include a date stamp):
+Tell the user: "Rocket Money will email a download link to the address on your account in a few minutes. Click the link in the email — the CSV will land in `~/Downloads/`. Tell me when it's done."
+
+Once they confirm, find the most recent `*.csv` in `~/Downloads/`:
 
 ```
 ls -t ~/Downloads/*.csv 2>/dev/null | head -5
 ```
 
-3. Confirm with the user which file it is (don't guess if there are multiple recent CSVs from other sources).
-
-4. Ingest:
+Confirm with the user which file is the RM export (don't guess if there are multiple recent CSVs).
 
 ```
 cd /Users/andrewnguyen/workspace/rocketgrabber && .venv/bin/python -m rocketgrabber.fetch <path-to-csv>
 ```
 
-This writes `data/transactions.csv` (canonical latest) and `data/raw/transactions-<ts>.csv` (per-run archive). It prints the column header and row count — relay both to the user.
+This copies to `data/transactions.csv`, archives under `data/raw/transactions-<ts>.csv`, and ingests into SQLite.
 
-### Step 4 — report
+### Step 4 — set up Gmail auto for next time (optional)
+
+If the user wants full automation going forward and hasn't set up `.env`:
+
+1. Have them generate an app password at https://myaccount.google.com/apppasswords (requires 2FA on their Google account).
+2. `cp .env.example .env` and have them paste the address + app password.
+3. `chmod 600 .env` (the file holds an app password — restrict permissions).
+
+Don't write the app password to disk yourself; have the user do it.
+
+### Step 5 — report
 
 Tell the user:
-- How many rows were ingested
-- The column header so they can sanity-check the export shape
-- The path to the canonical file (`data/transactions.csv`) and the archive
+- How many rows were inserted vs deduped (skipped)
+- Total rows now in `data/rocketgrabber.db`
+- The column header of the latest CSV (so they can sanity-check the export shape)
+- Path: `data/transactions.csv` is the canonical latest
 
 ## Things to avoid
 
-- **Don't try to scrape RM's GraphQL responses.** Earlier iterations tried this; the canonical CSV button is far simpler and gives RM's official export shape.
-- **Don't auto-pick a CSV from `~/Downloads/`** without user confirmation — they may have other CSVs floating around.
-- **Don't run `login` yourself.** It opens a headed browser and waits on `input()`; only the user can complete it.
-- **Don't push commits or create PRs** as part of this workflow. The skill is for ingesting data, not editing the repo.
+- **Don't run `login` yourself** — it opens a headed browser and waits on `input()`; only the user can complete it.
+- **Don't auto-pick a CSV from `~/Downloads/`** without user confirmation.
+- **Don't try to scrape RM's GraphQL responses.** An earlier iteration tried this; the canonical CSV-button flow is simpler and gives RM's official export shape.
+- **Don't push commits or create PRs** as part of this workflow. The skill ingests data; it doesn't edit the repo.
+- **Don't write the user's Gmail password into a file yourself.** Always have the user paste their app password into `.env`.
 
 ## Failure modes you may see
 
@@ -85,9 +91,10 @@ Tell the user:
 | `redirected to login — session expired` | Saved cookies expired | User runs `python -m rocketgrabber.login`, retry |
 | `could not find the CSV icon button` | RM redesigned the page | Run with `--manual`, user clicks |
 | `popover with 'Export all transactions' didn't appear` | Click missed or timing | Run with `--manual` |
-| Email never arrives (15+ min) | RM-side issue | Have user check spam, retry the trigger |
+| `IMAP login failed` | Wrong app password, or 2FA not enabled on Gmail | Regenerate app password, update `.env` |
+| `no export email arrived within timeout` | RM-side delay or Gmail filter too narrow | Wait, fall back to manual fetch (step 3) |
 | `data/transactions.csv` row count looks wrong | Wrong file ingested | Verify with the user, re-run `fetch` with the right path |
 
-## Background — why it works this way
+## Background
 
-Rocket Money has no public API. The web app at `app.rocketmoney.com` has a built-in CSV-export flow on the transactions page: a small icon-only button next to the sort control opens a popover containing an "Export all transactions" button. Clicking that triggers a server-side job; the result is emailed to the account holder as a download link. We can drive the trigger headlessly with Playwright using a persisted session, but the actual CSV download requires either (a) clicking the email link in any browser, or (b) full Gmail integration, which isn't built. The two-step (`grab` → user-clicks-email → `fetch`) is the simplest reliable workflow.
+Rocket Money has no public API. The web app at `app.rocketmoney.com` exposes a CSV-export icon on the transactions page; clicking it opens a popover with "Export all transactions". That triggers a server job that emails a download link — the actual CSV isn't a direct download from the click. We automate the trigger via Playwright, optionally pick up the email link via Gmail IMAP, and ingest the resulting CSV into a local SQLite DB plus a per-run CSV archive.
